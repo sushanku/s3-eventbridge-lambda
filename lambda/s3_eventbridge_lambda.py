@@ -1,37 +1,47 @@
-import json
 import boto3
-import urllib.parse
+import zipfile
+import tarfile
+import io
+import json
 
-# Initialize the S3 client
-s3 = boto3.client('s3')
+s3_client = boto3.client('s3')
 
 def lambda_handler(event, context):
-    print("Event triggered from S3 via EventBridge")
-    print(event)
+    print(f"Received event: {json.dumps(event)}")
     
-    # Check if the event has the necessary details
-    if 'detail' in event and 'bucket' in event['detail'] and 'object' in event['detail']:
-        source_bucket = event['detail']['bucket']['name']
-        source_key = urllib.parse.unquote_plus(event['detail']['object']['key'])
-        
-        # Define the destination bucket and key with the revised prefix
-        destination_bucket = 's3-eventbridge-sushan-revised-3'  # Change this to your destination bucket name
-        destination_key = 'revised_' + source_key
-        
-        try:
-            # Copy the object to the destination bucket
-            s3.copy_object(
-                Bucket=destination_bucket,
-                CopySource={'Bucket': source_bucket, 'Key': source_key},
-                Key=destination_key
-            )
-            print(f"Successfully copied {source_key} from {source_bucket} to {destination_key} in bucket {destination_bucket}")
-        except Exception as e:
-            print(f"Error copying object {source_key} to {destination_key}: {e}")
+    # Extract relevant information from EventBridge event
+    detail = event.get('detail', {})
+    source_bucket = detail.get('bucket', {}).get('name')
+    object_key = detail.get('object', {}).get('key')
+    
+    if not source_bucket or not object_key:
+        print("Error: Unable to extract bucket and key information from event")
+        return
+    
+    print(f"Processing file: {object_key} from bucket: {source_bucket}")
+    
+    # Download the file from S3
+    try:
+        response = s3_client.get_object(Bucket=source_bucket, Key=object_key)
+        file_content = response['Body'].read()
+    except Exception as e:
+        print(f"Error downloading file: {str(e)}")
+        return
+    
+    # Determine if it's a zip or tar file
+    if object_key.endswith('.zip'):
+        with zipfile.ZipFile(io.BytesIO(file_content)) as zip_ref:
+            for file_name in zip_ref.namelist():
+                file_data = zip_ref.read(file_name)
+                s3_client.put_object(Bucket='s3-eventbridge-sushan-revised-3', Key=file_name, Body=file_data)
+    elif object_key.endswith('.tar') or object_key.endswith('.tar.gz'):
+        with tarfile.open(fileobj=io.BytesIO(file_content), mode='r:*') as tar_ref:
+            for member in tar_ref.getmembers():
+                if member.isfile():
+                    file_data = tar_ref.extractfile(member).read()
+                    s3_client.put_object(Bucket='s3-eventbridge-sushan-revised-3', Key=member.name, Body=file_data)
     else:
-        print("Event does not contain necessary details to process S3 object.")
-
-    return {
-        'statusCode': 200,
-        'body': json.dumps('File copied successfully to the new bucket with revised prefix!')
-    }
+        print(f"Unsupported file type: {object_key}")
+        return
+    
+    print(f"Unarchived {object_key} to s3-eventbridge-sushan-revised-3")
